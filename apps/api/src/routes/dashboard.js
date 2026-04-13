@@ -1,52 +1,55 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
 // GET /api/dashboard/stats
-router.get('/stats', (req, res) => {
+router.get('/stats', async (req, res) => {
   try {
-    const db = getDb();
     const { branch_id } = req.query;
+    const bId = branch_id ? Number(branch_id) : null;
+    const invoiceBase = db('invoices').whereNotIn('status', ['Draft', 'Deleted']).modify((q) => {
+      if (bId) q.andWhere('branch_id', bId);
+    });
 
-    // BUG FIX #10: was using string interpolation `AND branch_id = ${parseInt(branch_id)}`
-    // which is an SQL injection risk. All filters must use parameterized queries.
-    const branchParams = branch_id ? [parseInt(branch_id, 10)] : [];
-    const branchSuffix = branch_id ? ` AND branch_id = ?` : '';
+    const totalSaleRow = await invoiceBase.clone().sum('grand_total as t').first();
+    const totalProfitRow = await invoiceBase.clone().select(db.raw('COALESCE(SUM(grand_total - subtotal),0) as t')).first();
+    const pendingPaymentRow = await db('invoices')
+      .where('is_credit_sale', true)
+      .whereIn('status', ['Credit', 'Overdue'])
+      .modify((q) => { if (bId) q.andWhere('branch_id', bId); })
+      .select(db.raw('COALESCE(SUM(grand_total - paid_amount),0) as t'))
+      .first();
+    const cashBalanceRow = await db('accounts').where({ account_type: 'Cash', is_active: true }).sum('current_balance as t').first();
+    const bankBalanceRow = await db('accounts').whereNot('account_type', 'Cash').andWhere('is_active', true).sum('current_balance as t').first();
+    const lowStockRow = await db('products').whereIn('status', ['Low', 'Critical']).andWhere('is_active', true).count('* as c').first();
+    const monthlySales = await db('invoices')
+      .whereNotIn('status', ['Draft', 'Deleted'])
+      .modify((q) => { if (bId) q.andWhere('branch_id', bId); })
+      .select(db.raw("to_char(invoice_date::date, 'MM') as month"))
+      .sum('grand_total as total')
+      .groupByRaw("to_char(invoice_date::date, 'MM')")
+      .orderBy('month');
+    const topProducts = await db('invoice_items as ii')
+      .join('invoices as i', 'i.id', 'ii.invoice_id')
+      .whereNotIn('i.status', ['Draft', 'Deleted'])
+      .modify((q) => { if (bId) q.andWhere('i.branch_id', bId); })
+      .select('ii.product_name')
+      .sum('ii.qty as units_sold')
+      .sum('ii.amount as revenue')
+      .groupBy('ii.product_name')
+      .orderBy('units_sold', 'desc')
+      .limit(5);
+    const recentInvoices = await db('invoices')
+      .whereNot('status', 'Draft')
+      .modify((q) => { if (bId) q.andWhere('branch_id', bId); })
+      .orderBy('created_at', 'desc')
+      .limit(5);
 
-    const totalSale = db.prepare(
-      `SELECT COALESCE(SUM(grand_total),0) as t FROM invoices WHERE status NOT IN ('Draft','Deleted')${branchSuffix}`
-    ).get(...branchParams).t;
-
-    const totalProfit = db.prepare(
-      `SELECT COALESCE(SUM(grand_total - subtotal),0) as t FROM invoices WHERE status NOT IN ('Draft','Deleted')${branchSuffix}`
-    ).get(...branchParams).t;
-
-    const pendingPayment = db.prepare(
-      `SELECT COALESCE(SUM(grand_total - paid_amount),0) as t FROM invoices WHERE is_credit_sale=1 AND status IN ('Credit','Overdue')${branchSuffix}`
-    ).get(...branchParams).t;
-
-    const cashBalance = db.prepare(
-      `SELECT COALESCE(SUM(current_balance),0) as t FROM accounts WHERE account_type='Cash' AND is_active=1`
-    ).get().t;
-
-    const bankBalance = db.prepare(
-      `SELECT COALESCE(SUM(current_balance),0) as t FROM accounts WHERE account_type != 'Cash' AND is_active=1`
-    ).get().t;
-
-    const lowStock = db.prepare(
-      `SELECT COUNT(*) as c FROM products WHERE status IN ('Low','Critical') AND is_active=1`
-    ).get().c;
-
-    const monthlySales = db.prepare(
-      `SELECT strftime('%m', invoice_date) as month, SUM(grand_total) as total FROM invoices WHERE status NOT IN ('Draft','Deleted')${branchSuffix} GROUP BY month ORDER BY month`
-    ).all(...branchParams);
-
-    const topProducts = db.prepare(
-      `SELECT ii.product_name, SUM(ii.qty) as units_sold, SUM(ii.amount) as revenue FROM invoice_items ii JOIN invoices i ON i.id=ii.invoice_id WHERE i.status NOT IN ('Draft','Deleted')${branch_id ? ' AND i.branch_id = ?' : ''} GROUP BY ii.product_name ORDER BY units_sold DESC LIMIT 5`
-    ).all(...branchParams);
-
-    const recentInvoices = db.prepare(
-      `SELECT * FROM invoices WHERE status NOT IN ('Draft')${branchSuffix} ORDER BY created_at DESC LIMIT 5`
-    ).all(...branchParams);
+    const totalSale = Number(totalSaleRow?.t || 0);
+    const totalProfit = Number(totalProfitRow?.t || 0);
+    const pendingPayment = Number(pendingPaymentRow?.t || 0);
+    const cashBalance = Number(cashBalanceRow?.t || 0);
+    const bankBalance = Number(bankBalanceRow?.t || 0);
+    const lowStock = Number(lowStockRow?.c || 0);
 
     res.json({ totalSale, totalProfit, pendingPayment, cashBalance, bankBalance, lowStock, monthlySales, topProducts, recentInvoices });
   } catch (e) { res.status(500).json({ error: e.message }); }

@@ -1,17 +1,16 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
 // GET /api/paybills
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { vendor_id, purchase_invoice_id } = req.query;
-    const db = getDb();
-    let q = `SELECT pb.*, v.vendor_name FROM pay_bills pb LEFT JOIN vendors v ON v.id=pb.vendor_id WHERE 1=1`;
-    const params = [];
-    if (vendor_id) { q += ` AND pb.vendor_id=?`; params.push(vendor_id); }
-    if (purchase_invoice_id) { q += ` AND pb.purchase_invoice_id=?`; params.push(purchase_invoice_id); }
-    q += ` ORDER BY pb.payment_date DESC, pb.id DESC`;
-    res.json(db.prepare(q).all(...params));
+    let query = db('pay_bills as pb')
+      .leftJoin('vendors as v', 'v.id', 'pb.vendor_id')
+      .select('pb.*', 'v.vendor_name');
+    if (vendor_id) query = query.where('pb.vendor_id', vendor_id);
+    if (purchase_invoice_id) query = query.where('pb.purchase_invoice_id', purchase_invoice_id);
+    res.json(await query.orderBy([{ column: 'pb.payment_date', order: 'desc' }, { column: 'pb.id', order: 'desc' }]));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -19,53 +18,50 @@ router.get('/', (req, res) => {
 // BUG FIX #9d: aligned INSERT with the simplified pay_bills schema.
 // Old schema had: outstanding_amount, total_payable, last_payment_date, paying_amount, payment_status
 // New schema uses: amount, reference_no, notes — matching what this route actually sends.
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
-    const db = getDb();
     const d = req.body;
     if (!d.vendor_id || !d.amount) return res.json({ success: false, error: 'vendor_id and amount required' });
 
-    const r = db.prepare(
-      `INSERT INTO pay_bills (vendor_id,purchase_invoice_id,amount,payment_mode,payment_date,reference_no,notes)
-       VALUES (?,?,?,?,?,?,?)`
-    ).run(
-      d.vendor_id,
-      d.purchase_invoice_id || null,
-      d.amount,
-      d.payment_mode || 'Cash',
-      d.payment_date || new Date().toISOString().slice(0, 10),
-      d.reference_no || '',
-      d.notes || ''
-    );
+    const rows = await db('pay_bills').insert({
+      vendor_id: d.vendor_id,
+      purchase_invoice_id: d.purchase_invoice_id || null,
+      amount: d.amount,
+      payment_mode: d.payment_mode || 'Cash',
+      payment_date: d.payment_date || new Date().toISOString().slice(0, 10),
+      reference_no: d.reference_no || '',
+      notes: d.notes || '',
+    }).returning('id');
 
     // Update purchase invoice pending amount and status if linked
     if (d.purchase_invoice_id) {
-      db.prepare(
-        `UPDATE purchase_invoices SET pending_amount=MAX(0,pending_amount-?), paid_amount=COALESCE(paid_amount,0)+? WHERE id=?`
-      ).run(d.amount, d.amount, d.purchase_invoice_id);
-
-      const pi = db.prepare(`SELECT pending_amount FROM purchase_invoices WHERE id=?`).get(d.purchase_invoice_id);
+      await db('purchase_invoices').where({ id: d.purchase_invoice_id }).update({
+        pending_amount: db.raw('GREATEST(0, pending_amount - ?)', [d.amount]),
+        paid_amount: db.raw('COALESCE(paid_amount,0) + ?', [d.amount]),
+      });
+      const pi = await db('purchase_invoices').select('pending_amount').where({ id: d.purchase_invoice_id }).first();
       if (pi && pi.pending_amount <= 0) {
-        db.prepare(`UPDATE purchase_invoices SET status='Paid' WHERE id=?`).run(d.purchase_invoice_id);
+        await db('purchase_invoices').where({ id: d.purchase_invoice_id }).update({ status: 'Paid' });
       }
     }
 
-    res.json({ success: true, id: r.lastInsertRowid });
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // DELETE /api/paybills/:id
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    const db = getDb();
-    const bill = db.prepare(`SELECT * FROM pay_bills WHERE id=?`).get(req.params.id);
+    const bill = await db('pay_bills').where({ id: req.params.id }).first();
     if (bill) {
       if (bill.purchase_invoice_id) {
-        db.prepare(
-          `UPDATE purchase_invoices SET pending_amount=pending_amount+?, paid_amount=MAX(0,COALESCE(paid_amount,0)-?), status='Pending' WHERE id=?`
-        ).run(bill.amount, bill.amount, bill.purchase_invoice_id);
+        await db('purchase_invoices').where({ id: bill.purchase_invoice_id }).update({
+          pending_amount: db.raw('pending_amount + ?', [bill.amount]),
+          paid_amount: db.raw('GREATEST(0, COALESCE(paid_amount,0) - ?)', [bill.amount]),
+          status: 'Pending',
+        });
       }
-      db.prepare(`DELETE FROM pay_bills WHERE id=?`).run(req.params.id);
+      await db('pay_bills').where({ id: req.params.id }).del();
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }

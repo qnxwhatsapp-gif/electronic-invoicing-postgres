@@ -1,62 +1,73 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
 // GET /api/customers
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { search } = req.query;
-    const db = getDb();
-    let q = `SELECT * FROM customers WHERE is_active=1`;
-    const params = [];
+    let query = db('customers').where('is_active', true);
     if (search) {
-      q += ` AND (name LIKE ? OR mobile LIKE ? OR email LIKE ?)`;
       const s = `%${search}%`;
-      params.push(s, s, s);
+      query = query.andWhere((qb) => qb.where('name', 'like', s).orWhere('mobile', 'like', s).orWhere('email', 'like', s));
     }
-    q += ` ORDER BY name`;
-    res.json(db.prepare(q).all(...params));
+    const customers = await query.orderBy('name');
+    res.json(customers);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST /api/customers
 // BUG FIX #9c: aligned INSERT columns with the expanded customers schema in database.js
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const d = req.body;
     if (!d.name) return res.json({ success: false, error: 'Name required' });
-    const r = getDb().prepare(
-      `INSERT INTO customers (name,mobile,email,address,city,state,pincode,gstin,customer_type,opening_balance,credit_limit,credit_days)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
-    ).run(
-      d.name, d.mobile || '', d.email || '', d.address || '',
-      d.city || '', d.state || '', d.pincode || '', d.gstin || '',
-      d.customer_type || 'Regular', d.opening_balance || 0,
-      d.credit_limit || 0, d.credit_days || 30
-    );
-    res.json({ success: true, id: r.lastInsertRowid });
+    const rows = await db('customers')
+      .insert({
+        name: d.name,
+        mobile: d.mobile || '',
+        email: d.email || '',
+        address: d.address || '',
+        city: d.city || '',
+        state: d.state || '',
+        pincode: d.pincode || '',
+        gstin: d.gstin || '',
+        customer_type: d.customer_type || 'Regular',
+        opening_balance: d.opening_balance || 0,
+        credit_limit: d.credit_limit || 0,
+        credit_days: d.credit_days || 30,
+      })
+      .returning('id');
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // PUT /api/customers/:id
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const d = req.body;
-    getDb().prepare(
-      `UPDATE customers SET name=?,mobile=?,email=?,address=?,city=?,state=?,pincode=?,gstin=?,customer_type=?,credit_limit=?,credit_days=? WHERE id=?`
-    ).run(
-      d.name, d.mobile || '', d.email || '', d.address || '',
-      d.city || '', d.state || '', d.pincode || '', d.gstin || '',
-      d.customer_type || 'Regular', d.credit_limit || 0,
-      d.credit_days || 30, req.params.id
-    );
+    await db('customers')
+      .where({ id: req.params.id })
+      .update({
+        name: d.name,
+        mobile: d.mobile || '',
+        email: d.email || '',
+        address: d.address || '',
+        city: d.city || '',
+        state: d.state || '',
+        pincode: d.pincode || '',
+        gstin: d.gstin || '',
+        customer_type: d.customer_type || 'Regular',
+        credit_limit: d.credit_limit || 0,
+        credit_days: d.credit_days || 30,
+      });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // DELETE /api/customers/:id  (soft delete)
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    getDb().prepare(`UPDATE customers SET is_active=0 WHERE id=?`).run(req.params.id);
+    await db('customers').where({ id: req.params.id }).update({ is_active: false });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
@@ -64,14 +75,14 @@ router.delete('/:id', (req, res) => {
 // GET /api/customers/:id/invoices
 // BUG FIX #9c: invoices table has no customer_id column — invoices store
 // customer_name as plain text. Query by name using the customers record.
-router.get('/:id/invoices', (req, res) => {
+router.get('/:id/invoices', async (req, res) => {
   try {
-    const db = getDb();
-    const customer = db.prepare(`SELECT name FROM customers WHERE id=?`).get(req.params.id);
+    const customer = await db('customers').select('name').where({ id: req.params.id }).first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-    const invoices = db.prepare(
-      `SELECT * FROM invoices WHERE customer_name = ? ORDER BY invoice_date DESC LIMIT 50`
-    ).all(customer.name);
+    const invoices = await db('invoices')
+      .where({ customer_name: customer.name })
+      .orderBy('invoice_date', 'desc')
+      .limit(50);
     res.json(invoices);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

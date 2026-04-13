@@ -1,28 +1,28 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const rows = getDb().prepare(`SELECT key, value FROM app_settings`).all();
+    const rows = await db('app_settings').select('key', 'value');
     const settings = {};
     for (const row of rows) settings[row.key] = row.value;
     res.json(settings);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/', (req, res) => {
+router.put('/', async (req, res) => {
   try {
-    const db = getDb();
-    const upsert = db.prepare(`INSERT INTO app_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`);
     const entries = Object.entries(req.body);
-    for (const [key, value] of entries) upsert.run(key, String(value));
+    for (const [key, value] of entries) {
+      await db('app_settings').insert({ key, value: String(value) }).onConflict('key').merge();
+    }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-router.get('/:key', (req, res) => {
+router.get('/:key', async (req, res) => {
   try {
-    const row = getDb().prepare(`SELECT value FROM app_settings WHERE key=?`).get(req.params.key);
+    const row = await db('app_settings').select('value').where({ key: req.params.key }).first();
     res.json({ key: req.params.key, value: row?.value ?? null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

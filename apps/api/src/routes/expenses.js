@@ -1,57 +1,72 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { search, category, from, to } = req.query;
-    const db = getDb();
-    let q = `SELECT e.*, ec.name as category_name FROM expenses e LEFT JOIN expense_categories ec ON ec.id=e.category_id WHERE 1=1`;
-    const params = [];
-    if (search) { q += ` AND (e.description LIKE ? OR ec.name LIKE ?)`; const s=`%${search}%`; params.push(s,s); }
-    if (category) { q += ` AND e.category_id=?`; params.push(category); }
-    if (from) { q += ` AND e.expense_date >= ?`; params.push(from); }
-    if (to) { q += ` AND e.expense_date <= ?`; params.push(to); }
-    q += ` ORDER BY e.expense_date DESC, e.id DESC`;
-    res.json(db.prepare(q).all(...params));
+    let query = db('expenses as e')
+      .leftJoin('expense_categories as ec', 'ec.id', 'e.category_id')
+      .select('e.*', 'ec.name as category_name');
+    if (search) { const s = `%${search}%`; query = query.where((qb) => qb.where('e.description', 'like', s).orWhere('ec.name', 'like', s)); }
+    if (category) query = query.where('e.category_id', category);
+    if (from) query = query.where('e.expense_date', '>=', from);
+    if (to) query = query.where('e.expense_date', '<=', to);
+    res.json(await query.orderBy([{ column: 'e.expense_date', order: 'desc' }, { column: 'e.id', order: 'desc' }]));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const d = req.body;
-    const db = getDb();
-    const cat = db.prepare(`SELECT name FROM expense_categories WHERE id=?`).get(d.category_id);
-    const r = db.prepare(`INSERT INTO expenses (category_id,category_name,amount,payment_mode,description,expense_date,created_by) VALUES (?,?,?,?,?,?,?)`
-    ).run(d.category_id||null, cat?.name||'', d.amount||0, d.payment_mode||'Cash', d.description||'', d.expense_date||new Date().toISOString().slice(0,10), d.created_by||null);
-    res.json({ success: true, id: r.lastInsertRowid });
+    const cat = await db('expense_categories').select('name').where({ id: d.category_id }).first();
+    const rows = await db('expenses')
+      .insert({
+        category_id: d.category_id || null,
+        category_name: cat?.name || '',
+        amount: d.amount || 0,
+        payment_mode: d.payment_mode || 'Cash',
+        description: d.description || '',
+        expense_date: d.expense_date || new Date().toISOString().slice(0, 10),
+        created_by: d.created_by || null,
+      })
+      .returning('id');
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    getDb().prepare(`DELETE FROM expenses WHERE id=?`).run(req.params.id);
+    await db('expenses').where({ id: req.params.id }).del();
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-router.get('/stats', (req, res) => {
+router.get('/stats', async (req, res) => {
   try {
-    const db = getDb();
     const month = new Date().toISOString().slice(0, 7);
-    const total = db.prepare(`SELECT COALESCE(SUM(amount),0) as val FROM expenses WHERE expense_date LIKE ?`).get(`${month}%`).val;
-    const byCategory = db.prepare(`SELECT ec.name as category, COALESCE(SUM(e.amount),0) as total FROM expenses e LEFT JOIN expense_categories ec ON ec.id=e.category_id WHERE e.expense_date LIKE ? GROUP BY e.category_id`).all(`${month}%`);
+    const totalRow = await db('expenses')
+      .where('expense_date', 'like', `${month}%`)
+      .sum('amount as val')
+      .first();
+    const total = Number(totalRow?.val || 0);
+    const byCategory = await db('expenses as e')
+      .leftJoin('expense_categories as ec', 'ec.id', 'e.category_id')
+      .where('e.expense_date', 'like', `${month}%`)
+      .groupBy('e.category_id', 'ec.name')
+      .select('ec.name as category')
+      .sum('e.amount as total');
     res.json({ total, byCategory });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/categories', (req, res) => {
-  try { res.json(getDb().prepare(`SELECT * FROM expense_categories WHERE is_active=1 ORDER BY name`).all()); }
+router.get('/categories', async (req, res) => {
+  try { res.json(await db('expense_categories').where('is_active', true).orderBy('name')); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.post('/categories', (req, res) => {
+router.post('/categories', async (req, res) => {
   try {
-    const r = getDb().prepare(`INSERT INTO expense_categories (name) VALUES (?)`).run(req.body.name);
-    res.json({ success: true, id: r.lastInsertRowid });
+    const rows = await db('expense_categories').insert({ name: req.body.name }).returning('id');
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 

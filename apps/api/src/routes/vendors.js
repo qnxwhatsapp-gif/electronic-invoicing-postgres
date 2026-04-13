@@ -1,47 +1,77 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { search } = req.query;
-    const db = getDb();
-    let q = `SELECT * FROM vendors WHERE 1=1`;
-    const params = [];
-    if (search) { q += ` AND (vendor_name LIKE ? OR company_name LIKE ?)`; const s = `%${search}%`; params.push(s, s); }
-    q += ` ORDER BY vendor_name`;
-    res.json(db.prepare(q).all(...params));
+    let query = db('vendors').select('*');
+    if (search) {
+      const s = `%${search}%`;
+      query = query.where((qb) => qb.where('vendor_name', 'like', s).orWhere('company_name', 'like', s));
+    }
+    res.json(await query.orderBy('vendor_name'));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const d = req.body;
-    const r = getDb().prepare(`INSERT INTO vendors (vendor_name,company_name,email,phone,street_address,city,province_state,postal_code,account_name,account_number) VALUES (?,?,?,?,?,?,?,?,?,?)`
-    ).run(d.vendor_name, d.company_name||'', d.email||'', d.phone||'', d.street_address||'', d.city||'', d.province_state||'', d.postal_code||'', d.account_name||'', d.account_number||'');
-    res.json({ success: true, id: r.lastInsertRowid });
+    const rows = await db('vendors')
+      .insert({
+        vendor_name: d.vendor_name,
+        company_name: d.company_name || '',
+        email: d.email || '',
+        phone: d.phone || '',
+        street_address: d.street_address || '',
+        city: d.city || '',
+        province_state: d.province_state || '',
+        postal_code: d.postal_code || '',
+        account_name: d.account_name || '',
+        account_number: d.account_number || '',
+      })
+      .returning('id');
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const d = req.body;
-    getDb().prepare(`UPDATE vendors SET vendor_name=?,company_name=?,email=?,phone=?,street_address=?,city=?,province_state=?,postal_code=?,account_name=?,account_number=? WHERE id=?`
-    ).run(d.vendor_name, d.company_name||'', d.email||'', d.phone||'', d.street_address||'', d.city||'', d.province_state||'', d.postal_code||'', d.account_name||'', d.account_number||'', req.params.id);
+    await db('vendors')
+      .where({ id: req.params.id })
+      .update({
+        vendor_name: d.vendor_name,
+        company_name: d.company_name || '',
+        email: d.email || '',
+        phone: d.phone || '',
+        street_address: d.street_address || '',
+        city: d.city || '',
+        province_state: d.province_state || '',
+        postal_code: d.postal_code || '',
+        account_name: d.account_name || '',
+        account_number: d.account_number || '',
+      });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    getDb().prepare(`DELETE FROM vendors WHERE id=?`).run(req.params.id);
+    await db('vendors').where({ id: req.params.id }).del();
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // Purchases under vendors
-router.get('/:id/purchases', (req, res) => {
+router.get('/:id/purchases', async (req, res) => {
   try {
-    const purchases = getDb().prepare(`SELECT pi.*, (SELECT COUNT(*) FROM purchase_invoice_items WHERE purchase_invoice_id=pi.id) as product_count FROM purchase_invoices pi WHERE pi.vendor_id=? ORDER BY pi.created_at DESC`).all(req.params.id);
+    const purchases = await db('purchase_invoices as pi')
+      .leftJoin('purchase_invoice_items as pii', 'pii.purchase_invoice_id', 'pi.id')
+      .where('pi.vendor_id', req.params.id)
+      .groupBy('pi.id')
+      .select('pi.*')
+      .count('pii.id as product_count')
+      .orderBy('pi.created_at', 'desc');
     res.json(purchases);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

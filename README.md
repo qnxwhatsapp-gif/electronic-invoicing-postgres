@@ -12,4 +12,10 @@ This workspace is the migration baseline for moving the invoicing platform from 
 
 - New migration workspace created
 - Desktop and API baselines copied into monorepo-style layout
-- Ready for Phase 2 (schema and migration tooling setup)
+
+## Phase 2 Status
+
+- Added PostgreSQL tooling in `apps/api` (`knex`, `pg`)
+- Added `knexfile.js` with support for `DATABASE_URL` and SSL toggle
+- Added first schema migration in `apps/api/migrations`
+- Added migration scripts in `apps/api/package.json`

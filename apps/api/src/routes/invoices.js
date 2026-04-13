@@ -1,88 +1,113 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
 // GET /api/invoices
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { status, search, branch_id } = req.query;
-    const db = getDb();
-    let q = `SELECT i.*, (SELECT COUNT(*) FROM invoice_items WHERE invoice_id=i.id) as item_count FROM invoices i WHERE 1=1`;
-    const params = [];
-    if (status) { q += ` AND i.status = ?`; params.push(status); }
-    if (branch_id) { q += ` AND i.branch_id = ?`; params.push(branch_id); }
+    let query = db('invoices as i')
+      .leftJoin('invoice_items as ii', 'ii.invoice_id', 'i.id')
+      .select('i.*')
+      .count('ii.id as item_count')
+      .groupBy('i.id');
+    if (status) query = query.where('i.status', status);
+    if (branch_id) query = query.where('i.branch_id', branch_id);
     if (search) {
-      q += ` AND (i.invoice_no LIKE ? OR i.customer_name LIKE ? OR CAST(i.grand_total AS TEXT) LIKE ?)`;
       const s = `%${search}%`;
-      params.push(s, s, s);
+      query = query.andWhere((qb) =>
+        qb.where('i.invoice_no', 'like', s).orWhere('i.customer_name', 'like', s).orWhereRaw('CAST(i.grand_total AS TEXT) LIKE ?', [s]));
     }
-    q += ` ORDER BY i.created_at DESC`;
-    res.json(db.prepare(q).all(...params));
+    res.json(await query.orderBy('i.created_at', 'desc'));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // BUG FIX #2: /returns and /autocomplete MUST come before /:id or Express
 // will treat the literal string "returns" / "autocomplete" as an id parameter.
 // GET /api/invoices/returns
-router.get('/returns', (req, res) => {
-  try { res.json(getDb().prepare(`SELECT * FROM return_exchange ORDER BY date DESC`).all()); }
+router.get('/returns', async (req, res) => {
+  try { res.json(await db('return_exchange').select('*').orderBy('date', 'desc')); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST /api/invoices/returns
-router.post('/returns', (req, res) => {
+router.post('/returns', async (req, res) => {
   try {
-    const db = getDb();
     const data = req.body;
     if (data.original_invoice_id) {
-      const origInv = db.prepare(`SELECT invoice_date, status FROM invoices WHERE id=?`).get(data.original_invoice_id);
+      const origInv = await db('invoices')
+        .select('invoice_date', 'status')
+        .where({ id: data.original_invoice_id })
+        .first();
       if (origInv) {
-        const days = db.prepare(`SELECT CAST(julianday('now') - julianday(?) AS INTEGER) as d`).get(origInv.invoice_date).d;
+        const days = Math.floor((Date.now() - new Date(origInv.invoice_date).getTime()) / (24 * 60 * 60 * 1000));
         if (days > 15) return res.json({ success: false, error: 'Return period of 15 days has expired for this invoice.' });
         if (origInv.status === 'Completed') return res.json({ success: false, error: 'This invoice is completed and cannot be returned.' });
       }
     }
-    const r = db.prepare(
-      `INSERT INTO return_exchange (original_invoice_id,invoice_no,customer_name,type,total_items_sold,items_returned,return_amount,exchange_amount,net_amount,status,created_by) VALUES (@original_invoice_id,@invoice_no,@customer_name,@type,@total_items_sold,@items_returned,@return_amount,@exchange_amount,@net_amount,@status,@created_by)`
-    ).run(data);
+    const rows = await db('return_exchange')
+      .insert({
+        original_invoice_id: data.original_invoice_id || null,
+        invoice_no: data.invoice_no || '',
+        customer_name: data.customer_name || '',
+        type: data.type,
+        total_items_sold: data.total_items_sold || 0,
+        items_returned: data.items_returned || 0,
+        return_amount: data.return_amount || 0,
+        exchange_amount: data.exchange_amount || 0,
+        net_amount: data.net_amount || 0,
+        status: data.status || 'complete',
+        created_by: data.created_by || null,
+      })
+      .returning('id');
     if (data.items) {
-      const upd = db.prepare(`UPDATE products SET current_stock=current_stock+? WHERE id=?`);
-      for (const item of data.items) if (item.returned_qty > 0) upd.run(item.returned_qty, item.product_id);
+      for (const item of data.items) {
+        if (item.returned_qty > 0) {
+          await db('products')
+            .where({ id: item.product_id })
+            .increment('current_stock', item.returned_qty);
+        }
+      }
     }
-    res.json({ success: true, id: r.lastInsertRowid });
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // POST /api/invoices/autocomplete  (marks overdue credit invoices)
-router.post('/autocomplete', (req, res) => {
+router.post('/autocomplete', async (req, res) => {
   try {
-    getDb().prepare(`UPDATE invoices SET status='Overdue' WHERE is_credit_sale=1 AND status='Credit' AND due_date < date('now')`).run();
+    await db('invoices')
+      .where('is_credit_sale', true)
+      .andWhere('status', 'Credit')
+      .andWhere('due_date', '<', db.fn.now())
+      .update({ status: 'Overdue' });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // GET /api/invoices/:id
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
-    const db = getDb();
-    const inv = db.prepare(`SELECT * FROM invoices WHERE id = ?`).get(req.params.id);
+    const inv = await db('invoices').where({ id: req.params.id }).first();
     if (!inv) return res.status(404).json({ error: 'Not found' });
-    inv.items = db.prepare(`SELECT * FROM invoice_items WHERE invoice_id = ?`).all(req.params.id);
+    inv.items = await db('invoice_items').where({ invoice_id: req.params.id });
     res.json(inv);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST /api/invoices
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
-    const db = getDb();
     const data = req.body;
 
     // Read prefix from invoice_settings so it respects user configuration
-    const settings = db.prepare(`SELECT inv_prefix, inv_start_number, inv_padding FROM invoice_settings WHERE id=1`).get();
+    const settings = await db('invoice_settings')
+      .select('inv_prefix', 'inv_start_number', 'inv_padding')
+      .where({ id: 1 })
+      .first();
     const prefix = settings?.inv_prefix || 'INV';
     const padding = settings?.inv_padding || 3;
 
-    const last = db.prepare(`SELECT invoice_no FROM invoices ORDER BY id DESC LIMIT 1`).get();
+    const last = await db('invoices').select('invoice_no').orderBy('id', 'desc').first();
     let seq = settings?.inv_start_number || 1;
     if (last) {
       const num = parseInt(last.invoice_no.replace(prefix, ''), 10);
@@ -90,15 +115,7 @@ router.post('/', (req, res) => {
     }
     const invoice_no = `${prefix}${String(seq).padStart(padding, '0')}`;
 
-    const insert = db.prepare(`
-      INSERT INTO invoices (invoice_no,invoice_date,due_date,customer_name,customer_phone,customer_address,
-        seller_id,branch_id,subtotal,tax_amount,grand_total,payment_mode,cash_amount,online_amount,
-        internal_notes,status,type,is_credit_sale,paid_amount,created_by)
-      VALUES (@invoice_no,@invoice_date,@due_date,@customer_name,@customer_phone,@customer_address,
-        @seller_id,@branch_id,@subtotal,@tax_amount,@grand_total,@payment_mode,@cash_amount,@online_amount,
-        @internal_notes,@status,@type,@is_credit_sale,@paid_amount,@created_by)
-    `);
-    const result = insert.run({
+    const invoicePayload = {
       invoice_no,
       invoice_date: data.invoice_date,
       due_date: data.due_date || null,
@@ -119,37 +136,50 @@ router.post('/', (req, res) => {
       is_credit_sale: data.is_credit_sale || 0,
       paid_amount: data.is_credit_sale ? 0 : (data.grand_total || 0),
       created_by: data.created_by || null,
-    });
-    const invoiceId = result.lastInsertRowid;
+    };
+    const invoiceId = await db.transaction(async (trx) => {
+      const rows = await trx('invoices').insert(invoicePayload).returning('id');
+      const createdInvoiceId = rows[0]?.id;
 
-    if (data.items && data.items.length) {
-      const insItem = db.prepare(`INSERT INTO invoice_items (invoice_id,product_id,product_code,product_name,qty,rate,amount) VALUES (?,?,?,?,?,?,?)`);
-      const updStock = db.prepare(`UPDATE products SET current_stock = current_stock - ?, status = CASE WHEN current_stock - ? <= 5 THEN 'Critical' WHEN current_stock - ? <= reorder_level THEN 'Low' ELSE 'Good' END WHERE id = ?`);
-      for (const item of data.items) {
-        insItem.run(invoiceId, item.product_id, item.product_code || item.sku || '', item.product_name || item.name || '', item.qty, item.rate, item.amount);
-        if (data.status !== 'Draft') updStock.run(item.qty, item.qty, item.qty, item.product_id);
+      if (data.items && data.items.length) {
+        for (const item of data.items) {
+          await trx('invoice_items').insert({
+            invoice_id: createdInvoiceId,
+            product_id: item.product_id,
+            product_code: item.product_code || item.sku || '',
+            product_name: item.product_name || item.name || '',
+            qty: item.qty,
+            rate: item.rate,
+            amount: item.amount,
+          });
+
+          if (data.status !== 'Draft') {
+            const product = await trx('products')
+              .select('current_stock', 'reorder_level')
+              .where({ id: item.product_id })
+              .first();
+            if (product) {
+              const nextStock = Number(product.current_stock || 0) - Number(item.qty || 0);
+              const statusVal = nextStock <= 5 ? 'Critical' : nextStock <= Number(product.reorder_level || 10) ? 'Low' : 'Good';
+              await trx('products').where({ id: item.product_id }).update({ current_stock: nextStock, status: statusVal });
+            }
+          }
+        }
       }
-    }
+      return createdInvoiceId;
+    });
     res.json({ success: true, invoice_no, id: invoiceId });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // PUT /api/invoices/:id
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
-    const db = getDb();
     const { id } = req.params;
     const data = req.body;
-    db.prepare(`
-      UPDATE invoices SET invoice_date=@invoice_date,due_date=@due_date,customer_name=@customer_name,
-        customer_phone=@customer_phone,customer_address=@customer_address,seller_id=@seller_id,
-        branch_id=@branch_id,subtotal=@subtotal,tax_amount=@tax_amount,grand_total=@grand_total,
-        payment_mode=@payment_mode,cash_amount=@cash_amount,online_amount=@online_amount,
-        internal_notes=@internal_notes,status=@status,type=@type,is_credit_sale=@is_credit_sale,
-        paid_amount=@paid_amount,updated_at=datetime('now')
-      WHERE id=@id
-    `).run({
-      id,
+    await db('invoices')
+      .where({ id })
+      .update({
       invoice_date: data.invoice_date,
       due_date: data.due_date || null,
       customer_name: data.customer_name || '',
@@ -168,29 +198,41 @@ router.put('/:id', (req, res) => {
       type: data.type || 'Sale',
       is_credit_sale: data.is_credit_sale || 0,
       paid_amount: data.paid_amount || 0,
+      updated_at: db.fn.now(),
     });
     if (data.items) {
-      db.prepare(`DELETE FROM invoice_items WHERE invoice_id = ?`).run(id);
-      const ins = db.prepare(`INSERT INTO invoice_items (invoice_id,product_id,product_code,product_name,qty,rate,amount) VALUES (?,?,?,?,?,?,?)`);
-      for (const item of data.items) ins.run(id, item.product_id, item.product_code || '', item.product_name || item.name || '', item.qty, item.rate, item.amount);
+      await db('invoice_items').where({ invoice_id: id }).del();
+      for (const item of data.items) {
+        await db('invoice_items').insert({
+          invoice_id: id,
+          product_id: item.product_id,
+          product_code: item.product_code || '',
+          product_name: item.product_name || item.name || '',
+          qty: item.qty,
+          rate: item.rate,
+          amount: item.amount,
+        });
+      }
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // PUT /api/invoices/:id/status
-router.put('/:id/status', (req, res) => {
+router.put('/:id/status', async (req, res) => {
   try {
     const { status, paid_amount } = req.body;
-    getDb().prepare(`UPDATE invoices SET status=?, paid_amount=COALESCE(?,paid_amount), updated_at=datetime('now') WHERE id=?`).run(status, paid_amount, req.params.id);
+    const updatePayload = { status, updated_at: db.fn.now() };
+    if (paid_amount !== undefined && paid_amount !== null) updatePayload.paid_amount = paid_amount;
+    await db('invoices').where({ id: req.params.id }).update(updatePayload);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // DELETE /api/invoices/:id
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    getDb().prepare(`DELETE FROM invoices WHERE id = ?`).run(req.params.id);
+    await db('invoices').where({ id: req.params.id }).del();
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });

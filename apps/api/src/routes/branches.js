@@ -1,9 +1,9 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
 // GET /api/branches
-router.get('/', (req, res) => {
-  try { res.json(getDb().prepare(`SELECT * FROM branches WHERE is_active=1 ORDER BY name`).all()); }
+router.get('/', async (req, res) => {
+  try { res.json(await db('branches').where('is_active', true).orderBy('name')); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -11,39 +11,50 @@ router.get('/', (req, res) => {
 // BUG FIX #9b: aligned INSERT columns with the expanded branches schema.
 // Old schema only had: name, store_id, address, is_active
 // Expanded schema now includes city, state, phone, email, gstin.
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const d = req.body;
     if (!d.name) return res.json({ success: false, error: 'Name required' });
-    const r = getDb().prepare(
-      `INSERT INTO branches (name,address,city,state,phone,email,gstin,is_active) VALUES (?,?,?,?,?,?,?,1)`
-    ).run(
-      d.name, d.address || '', d.city || '', d.state || '',
-      d.phone || '', d.email || '', d.gstin || ''
-    );
-    res.json({ success: true, id: r.lastInsertRowid });
+    const rows = await db('branches')
+      .insert({
+        name: d.name,
+        address: d.address || '',
+        city: d.city || '',
+        state: d.state || '',
+        phone: d.phone || '',
+        email: d.email || '',
+        gstin: d.gstin || '',
+        is_active: true,
+      })
+      .returning('id');
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // PUT /api/branches/:id
-router.put('/:id', (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const d = req.body;
-    getDb().prepare(
-      `UPDATE branches SET name=?,address=?,city=?,state=?,phone=?,email=?,gstin=?,is_active=? WHERE id=?`
-    ).run(
-      d.name, d.address || '', d.city || '', d.state || '',
-      d.phone || '', d.email || '', d.gstin || '', d.is_active ?? 1,
-      req.params.id
-    );
+    await db('branches')
+      .where({ id: req.params.id })
+      .update({
+        name: d.name,
+        address: d.address || '',
+        city: d.city || '',
+        state: d.state || '',
+        phone: d.phone || '',
+        email: d.email || '',
+        gstin: d.gstin || '',
+        is_active: d.is_active ?? true,
+      });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // DELETE /api/branches/:id  (soft delete)
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
-    getDb().prepare(`UPDATE branches SET is_active=0 WHERE id=?`).run(req.params.id);
+    await db('branches').where({ id: req.params.id }).update({ is_active: false });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });

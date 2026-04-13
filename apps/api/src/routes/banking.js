@@ -1,91 +1,113 @@
 const router = require('express').Router();
-const { getDb } = require('../db/database');
+const db = require('../db/pg');
 
 // Accounts
-router.get('/accounts', (req, res) => {
-  try { res.json(getDb().prepare(`SELECT * FROM accounts WHERE is_active=1 ORDER BY account_name`).all()); }
+router.get('/accounts', async (req, res) => {
+  try { res.json(await db('accounts').where('is_active', true).orderBy('account_name')); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.post('/accounts', (req, res) => {
+router.post('/accounts', async (req, res) => {
   try {
     const d = req.body;
-    const r = getDb().prepare(`INSERT INTO accounts (account_name,account_type,bank_name,account_number,ifsc_code,opening_balance,current_balance,is_primary) VALUES (?,?,?,?,?,?,?,?)`
-    ).run(d.account_name, d.account_type||'Cash', d.bank_name||'', d.account_number||'', d.ifsc_code||'', d.opening_balance||0, d.opening_balance||0, d.is_primary||0);
-    res.json({ success: true, id: r.lastInsertRowid });
+    const rows = await db('accounts')
+      .insert({
+        account_name: d.account_name,
+        account_type: d.account_type || 'Cash',
+        bank_name: d.bank_name || '',
+        account_number: d.account_number || '',
+        ifsc_code: d.ifsc_code || '',
+        opening_balance: d.opening_balance || 0,
+        current_balance: d.opening_balance || 0,
+        is_primary: !!d.is_primary,
+      })
+      .returning('id');
+    res.json({ success: true, id: rows[0]?.id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.put('/accounts/:id', (req, res) => {
+router.put('/accounts/:id', async (req, res) => {
   try {
     const d = req.body;
-    getDb().prepare(`UPDATE accounts SET account_name=?,account_type=?,bank_name=?,account_number=?,ifsc_code=?,is_primary=? WHERE id=?`
-    ).run(d.account_name, d.account_type, d.bank_name||'', d.account_number||'', d.ifsc_code||'', d.is_primary||0, req.params.id);
+    await db('accounts').where({ id: req.params.id }).update({
+      account_name: d.account_name,
+      account_type: d.account_type,
+      bank_name: d.bank_name || '',
+      account_number: d.account_number || '',
+      ifsc_code: d.ifsc_code || '',
+      is_primary: !!d.is_primary,
+    });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.delete('/accounts/:id', (req, res) => {
+router.delete('/accounts/:id', async (req, res) => {
   try {
-    getDb().prepare(`UPDATE accounts SET is_active=0 WHERE id=?`).run(req.params.id);
+    await db('accounts').where({ id: req.params.id }).update({ is_active: false });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // Transactions
-router.get('/transactions', (req, res) => {
+router.get('/transactions', async (req, res) => {
   try {
     const { account_id } = req.query;
-    let q = `SELECT bt.*, a.account_name as acct_name FROM banking_transactions bt LEFT JOIN accounts a ON a.id=bt.account_id WHERE 1=1`;
-    const params = [];
-    if (account_id) { q += ` AND bt.account_id=?`; params.push(account_id); }
-    q += ` ORDER BY bt.date DESC, bt.id DESC`;
-    res.json(getDb().prepare(q).all(...params));
+    let query = db('banking_transactions as bt')
+      .leftJoin('accounts as a', 'a.id', 'bt.account_id')
+      .select('bt.*', 'a.account_name as acct_name');
+    if (account_id) query = query.where('bt.account_id', account_id);
+    res.json(await query.orderBy([{ column: 'bt.date', order: 'desc' }, { column: 'bt.id', order: 'desc' }]));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.post('/transactions', (req, res) => {
+router.post('/transactions', async (req, res) => {
   try {
-    const db = getDb();
     const d = req.body;
     const year = new Date().getFullYear().toString().slice(-2);
-    const last = db.prepare(`SELECT txn_id FROM banking_transactions ORDER BY id DESC LIMIT 1`).get();
+    const last = await db('banking_transactions').select('txn_id').orderBy('id', 'desc').first();
     let seq = 1;
-    if (last) { const n = parseInt(last.txn_id.replace(`TXN-${year}`,''),10); seq = isNaN(n)?1:n+1; }
+    if (last?.txn_id) { const n = parseInt(last.txn_id.replace(`TXN-${year}`, ''), 10); seq = isNaN(n) ? 1 : n + 1; }
     const txn_id = `TXN-${year}${String(seq).padStart(3,'0')}`;
-    const acct = db.prepare(`SELECT * FROM accounts WHERE id=?`).get(d.account_id);
+    const acct = await db('accounts').where({ id: d.account_id }).first();
     if (!acct) return res.json({ success: false, error: 'Account not found' });
-    db.prepare(`INSERT INTO banking_transactions (txn_id,account_id,account_name,date,description,type,amount) VALUES (?,?,?,?,?,?,?)`
-    ).run(txn_id, d.account_id, acct.account_name, d.date, d.description||'', d.type, d.amount);
+    await db('banking_transactions').insert({
+      txn_id, account_id: d.account_id, account_name: acct.account_name,
+      date: d.date, description: d.description || '', type: d.type, amount: d.amount,
+    });
     const delta = d.type === 'Credit' ? d.amount : -d.amount;
-    db.prepare(`UPDATE accounts SET current_balance=current_balance+? WHERE id=?`).run(delta, d.account_id);
+    await db('accounts').where({ id: d.account_id }).increment('current_balance', delta);
     res.json({ success: true, txn_id });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.delete('/transactions/:id', (req, res) => {
+router.delete('/transactions/:id', async (req, res) => {
   try {
-    const db = getDb();
-    const txn = db.prepare(`SELECT * FROM banking_transactions WHERE id=?`).get(req.params.id);
+    const txn = await db('banking_transactions').where({ id: req.params.id }).first();
     if (txn) {
       const delta = txn.type === 'Credit' ? -txn.amount : txn.amount;
-      db.prepare(`UPDATE accounts SET current_balance=current_balance+? WHERE id=?`).run(delta, txn.account_id);
-      db.prepare(`DELETE FROM banking_transactions WHERE id=?`).run(req.params.id);
+      await db('accounts').where({ id: txn.account_id }).increment('current_balance', delta);
+      await db('banking_transactions').where({ id: req.params.id }).del();
     }
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
-router.post('/transfer', (req, res) => {
+router.post('/transfer', async (req, res) => {
   try {
-    const db = getDb();
     const { from_account_id, to_account_id, amount, date, description } = req.body;
-    const fromAcct = db.prepare(`SELECT * FROM accounts WHERE id=?`).get(from_account_id);
-    const toAcct = db.prepare(`SELECT * FROM accounts WHERE id=?`).get(to_account_id);
+    const fromAcct = await db('accounts').where({ id: from_account_id }).first();
+    const toAcct = await db('accounts').where({ id: to_account_id }).first();
     if (!fromAcct || !toAcct) return res.json({ success: false, error: 'Account not found' });
-    db.prepare(`UPDATE accounts SET current_balance=current_balance-? WHERE id=?`).run(amount, from_account_id);
-    db.prepare(`UPDATE accounts SET current_balance=current_balance+? WHERE id=?`).run(amount, to_account_id);
+    await db('accounts').where({ id: from_account_id }).decrement('current_balance', amount);
+    await db('accounts').where({ id: to_account_id }).increment('current_balance', amount);
     const year = new Date().getFullYear().toString().slice(-2);
-    const last = db.prepare(`SELECT txn_id FROM banking_transactions ORDER BY id DESC LIMIT 1`).get();
-    let seq = last ? parseInt(last.txn_id.replace(`TXN-${year}`,''),10)+1 : 1;
-    db.prepare(`INSERT INTO banking_transactions (txn_id,account_id,account_name,date,description,type,amount) VALUES (?,?,?,?,?,?,?)`
-    ).run(`TXN-${year}${String(seq).padStart(3,'0')}`, from_account_id, fromAcct.account_name, date, description||'Transfer out', 'Debit', amount);
-    db.prepare(`INSERT INTO banking_transactions (txn_id,account_id,account_name,date,description,type,amount) VALUES (?,?,?,?,?,?,?)`
-    ).run(`TXN-${year}${String(seq+1).padStart(3,'0')}`, to_account_id, toAcct.account_name, date, description||'Transfer in', 'Credit', amount);
+    const last = await db('banking_transactions').select('txn_id').orderBy('id', 'desc').first();
+    let seq = last?.txn_id ? parseInt(last.txn_id.replace(`TXN-${year}`, ''), 10) + 1 : 1;
+    if (Number.isNaN(seq)) seq = 1;
+    await db('banking_transactions').insert({
+      txn_id: `TXN-${year}${String(seq).padStart(3, '0')}`,
+      account_id: from_account_id, account_name: fromAcct.account_name, date,
+      description: description || 'Transfer out', type: 'Debit', amount,
+    });
+    await db('banking_transactions').insert({
+      txn_id: `TXN-${year}${String(seq + 1).padStart(3, '0')}`,
+      account_id: to_account_id, account_name: toAcct.account_name, date,
+      description: description || 'Transfer in', type: 'Credit', amount,
+    });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ success: false, error: e.message }); }
 });
