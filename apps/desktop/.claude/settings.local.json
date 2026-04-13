@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell.exe -NoProfile -Command \"git config --global user.name 2>&1; git config --global user.email 2>&1\")",
+      "Bash(powershell.exe -NoProfile -Command \":*)"
+    ]
+  }
+}

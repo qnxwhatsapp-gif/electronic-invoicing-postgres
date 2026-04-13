@@ -1,0 +1,106 @@
+{
+  "name": "electronic-invoicing-app",
+  "version": "1.0.0",
+  "description": "Electronic Invoicing Desktop App built with Electron + React + SQLite",
+  "author": "Invoicing App",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "concurrently \"npm run react-start\" \"wait-on http://localhost:3000 && electron .\"",
+    "react-start": "react-scripts start",
+    "react-build": "react-scripts build",
+    "electron": "electron .",
+    "dev": "concurrently \"npm run react-start\" \"wait-on http://localhost:3000 && electron .\"",
+    "build": "npm run react-build && electron-builder",
+    "build:msi": "npm run react-build && electron-builder --win msi --x64",
+    "seed": "node src/main/seed.js"
+  },
+  "dependencies": {
+    "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^9.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
+    "lucide-react": "^0.363.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-hot-toast": "^2.4.1",
+    "react-router-dom": "^6.22.3",
+    "react-scripts": "5.0.1",
+    "recharts": "^2.10.3",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^29.1.4",
+    "electron-builder": "^24.13.3",
+    "electron-rebuild": "^3.2.9",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.invoicing.app",
+    "productName": "Invoicing App",
+    "copyright": "Copyright © 2024 Invoicing App",
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "node_modules/better-sqlite3/**/*",
+      "server/**/*"
+    ],
+    "files": [
+      "build/**/*",
+      "src/main/**/*",
+      "server/**/*",
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*",
+      "!src/renderer/**/*"
+    ],
+    "extraMetadata": {
+      "main": "src/main/main.js"
+    },
+    "directories": {
+      "buildResources": "assets",
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "msi",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "publisherName": "Invoicing App"
+    },
+    "msi": {
+      "oneClick": false,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Invoicing App",
+      "upgradeCode": "F7B6A123-4D89-4E2A-B5C8-9A3F2E1D7896"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "homepage": "./",
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
